@@ -1,5 +1,5 @@
 -module(web_server).
--export([start/0, start/1]).
+-export([start/0, start/1, stop/1, get_views/1]).
 
 -record(request, {
     method  = undef,
@@ -13,7 +13,18 @@
 %%
 start() -> start(8080).
 start(Port) ->
-    do_start(Port).
+    spawn(fun() -> do_start(Port) end).
+
+
+stop(Pid) ->
+    Pid ! stop.
+
+
+get_views(Pid) ->
+    Pid ! {get_views, self()},
+    receive
+        {views, Views} -> Views
+    end.
 
 
 %%
@@ -27,13 +38,28 @@ do_start(Port) ->
              {active, false},
              {backlog, 1024} ],
     {ok, LSock} = gen_tcp:listen(Port, Opts),
-    accept_loop(LSock, Views).
+    spawn(fun() -> accept_loop(LSock, Views) end),
+    command_loop(LSock, Views).
+
+
+command_loop(LSock, Views) ->
+    receive
+        stop ->
+            gen_tcp:close(LSock);
+        {get_views, Caller} ->
+            Data = ets:tab2list(Views),
+            Caller ! {views, Data},
+            command_loop(LSock, Views)
+    end.
 
 
 accept_loop(LSock, Views) ->
-    {ok, Sock} = gen_tcp:accept(LSock),
-    spawn(fun() -> handle_loop(Sock, Views) end),
-    accept_loop(LSock, Views).
+    case gen_tcp:accept(LSock) of
+        {ok, Sock} ->
+            spawn(fun() -> handle_loop(Sock, Views) end),
+            accept_loop(LSock, Views);
+        _ -> ok
+    end.
 
 
 handle_loop(Sock, Views) ->
