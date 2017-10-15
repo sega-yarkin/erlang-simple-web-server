@@ -29,7 +29,7 @@ do_start(Port) ->
 
 accept_loop(LSock) ->
     {ok, Sock} = gen_tcp:accept(LSock),
-    handle_loop(Sock),
+    spawn(fun() -> handle_loop(Sock) end),
     accept_loop(LSock).
 
 
