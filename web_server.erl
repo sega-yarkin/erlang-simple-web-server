@@ -20,50 +20,39 @@ start(Port) ->
 %% Internal
 %%
 do_start(Port) ->
+    %% DB
+    Views = ets:new(views, [set, public]),
+    %% Net
     Opts = [ {packet, http},
              {active, false},
              {backlog, 1024} ],
     {ok, LSock} = gen_tcp:listen(Port, Opts),
-    accept_loop(LSock).
+    accept_loop(LSock, Views).
 
 
-accept_loop(LSock) ->
+accept_loop(LSock, Views) ->
     {ok, Sock} = gen_tcp:accept(LSock),
-    spawn(fun() -> handle_loop(Sock) end),
-    accept_loop(LSock).
+    spawn(fun() -> handle_loop(Sock, Views) end),
+    accept_loop(LSock, Views).
 
 
-handle_loop(Sock) ->
-    case handle_request(Sock) of
-        loop  -> handle_loop(Sock);
+handle_loop(Sock, Views) ->
+    case handle_request(Sock, Views) of
+        loop  -> handle_loop(Sock, Views);
         close -> gen_tcp:close(Sock)
     end.
 
 
-handle_request(Sock) ->
+handle_request(Sock, Views) ->
     case parse_request(Sock) of
         ignore -> close;
-        {ok, #request{path    = Path,
-                      headers = #{'Connection' := Conn}}}
-                when Conn =:= "keep-alive";
-                     Conn =:= "Keep-Alive" ->
-            Body = ["The page '", Path, "' is cool, isn't it?"],
-            CLen = iolist_size(Body),
-            gen_tcp:send(Sock, [
-                "HTTP/1.0 200 OK\r\n",
-                "Connection: keep-alive\r\n",
-                ["Content-Length: ", integer_to_list(CLen), "\r\n"],
-                "\r\n",
-                Body
-            ]),
-            loop;
-        {ok, #request{path = Path}} ->
-            gen_tcp:send(Sock, [
-                "HTTP/1.0 200 OK\r\n",
-                "\r\n",
-                "The page '", Path, "' is cool, isn't it?"
-            ]),
-            close;
+        {ok, Req = #request{}} ->
+            {Resp, KA} = get_response(Req, Views),
+            gen_tcp:send(Sock, Resp),
+            case KA of
+                true  -> loop;
+                false -> close
+            end;
         {error, Error} ->
             io:format("Error: ~p", [Error]),
             gen_tcp:send(Sock, [
@@ -96,3 +85,47 @@ parse_request(Sock, Req) ->
         {error, Error } -> {error, Error};
         Data            -> {error, Data}
     end.
+
+
+get_views(Path, Views) ->
+    ets:update_counter(Views, Path, 1, {Path, 0}).
+
+
+format_views(1) -> ["There is 1 view already!"];
+format_views(N) -> ["There are ", integer_to_list(N), " views already!"].
+
+
+get_body(#request{path = Path}, Views) ->
+    ViewCnt = get_views(Path, Views),
+    Body = [ "The page '", Path,
+             "' is cool, isn't it?\r\n",
+             format_views(ViewCnt)],
+    {Body, iolist_size(Body)}.
+
+
+is_keepalive(#request{headers = #{'Connection' := Conn}}) ->
+    string:to_lower(Conn) =:= "keep-alive";
+is_keepalive(_) -> false.
+
+
+get_headers(KA, CLen) ->
+    Conn = case KA of
+        true  -> {"Connection", "keep-alive"};
+        false -> {"Connection", "close"}
+    end,
+    ContLen = {"Content-Length",
+                integer_to_list(CLen)},
+    Headers = [ Conn, ContLen ],
+    [ [Name, ": ", Value, "\r\n"]
+        || {Name, Value} <- Headers ].
+
+
+get_response(Req, Views) ->
+    {Body, CLen} = get_body(Req, Views),
+    IsKA = is_keepalive(Req),
+    Headers = get_headers(IsKA, CLen),
+    Resp = [ "HTTP/1.0 200 OK\r\n",
+             Headers,
+             "\r\n",
+             Body ],
+    {Resp, IsKA}.
